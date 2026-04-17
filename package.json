@@ -1,6 +1,6 @@
 {
   "name": "@panzenbaby/pi-secure-extension",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "license": "MIT",
   "type": "module",
   "private": false,

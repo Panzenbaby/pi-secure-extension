@@ -26,15 +26,29 @@ const PROMPT_INJECTION_GUARD =
 
 const STATIC_OUTPUT_CONTRACT =
   "MANDATORY OUTPUT CONTRACT (always required):\n" +
-  "At the VERY END of your response, append a fenced JSON block and nothing after it:\n\n" +
-  "```json\n" +
-  '{"risk":"HIGH","verdict":"INSTALL WITH CAUTION"}\n' +
+  "At the VERY END of your response, you must append TWO blocks in this exact order:\n\n" +
+
+  "1) A fenced block labeled `aggregation` showing the severity aggregation trace:\n\n" +
+  "```aggregation\n" +
+  "Bucket A (genuine vulnerabilities, By-Design=NO): <list each finding as 'CATEGORY: SEVERITY' or 'empty'>\n" +
+  "Bucket B (by-design behaviors, By-Design=YES): <list each finding as 'CATEGORY: SEVERITY'>\n" +
+  "Base rating (from Bucket A, Step 2): <CRITICAL|HIGH|MEDIUM|LOW|SAFE>\n" +
+  "Modifier applied (Step 3): <NONE | +1 step, reason: ...>\n" +
+  "Mitigation cap (Step 4): <NONE | capped at MEDIUM | capped at LOW, reason: ...>\n" +
+  "Final Risk Level: <CRITICAL|HIGH|MEDIUM|LOW|SAFE>\n" +
+  "Consistency check (Step 5): <PASS | FAIL, reason: ...>\n" +
   "```\n\n" +
-  "Rules for that JSON block:\n" +
-  "- It must be the last block in the response.\n" +
-  "- It must contain exactly these keys: risk, verdict.\n" +
-  "- risk must be one of: CRITICAL, HIGH, MEDIUM, LOW, SAFE.\n" +
-  "- verdict must be one of: SAFE TO INSTALL, INSTALL WITH CAUTION, DO NOT INSTALL.\n\n";
+
+  "2) Immediately after, a fenced JSON block and nothing after it:\n\n" +
+  "```json\n" +
+  '{"risk":"<CRITICAL|HIGH|MEDIUM|LOW|SAFE>","verdict":"<SAFE TO INSTALL|INSTALL WITH CAUTION|DO NOT INSTALL>"}\n' +
+  "```\n\n" +
+
+  "Rules:\n" +
+  "- The aggregation block must appear before the JSON block.\n" +
+  "- The `Final Risk Level` in the aggregation block and `risk` in the JSON block MUST match.\n" +
+  "- If they do not match, your answer is invalid — recompute before emitting.\n" +
+  "- Do not copy placeholder values literally; compute them from the findings.\n\n";
 
 function formatSourceForPrompt(source: ResolvedSource): string {
   const parts: string[] = [
@@ -79,7 +93,7 @@ export async function runAudit(
   const auditRules = await loadAuditRules(confirm);
 
   const systemPrompt =
-    PROMPT_INJECTION_GUARD + STATIC_OUTPUT_CONTRACT + auditRules;
+    PROMPT_INJECTION_GUARD + auditRules + STATIC_OUTPUT_CONTRACT;
 
   const sourceContent = formatSourceForPrompt(source);
 
@@ -105,7 +119,7 @@ export async function runAudit(
     tools: [],
     customTools: [],
     sessionManager: SessionManager.inMemory(),
-    thinkingLevel: "low",
+    thinkingLevel: "medium",
     modelRegistry: ctx.modelRegistry,
     resourceLoader,
   });
