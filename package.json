@@ -1,0 +1,50 @@
+{
+  "name": "pi-secure-extension",
+  "version": "0.1.0",
+  "license": "MIT",
+  "type": "module",
+  "private": false,
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi",
+    "security",
+    "audit"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "src",
+    "audit-rules",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "@mariozechner/pi-agent-core": ">=0.61.0",
+    "@mariozechner/pi-ai": ">=0.61.0",
+    "@mariozechner/pi-coding-agent": ">=0.61.0"
+  },
+  "peerDependenciesMeta": {
+    "@mariozechner/pi-agent-core": {
+      "optional": true
+    },
+    "@mariozechner/pi-ai": {
+      "optional": true
+    },
+    "@mariozechner/pi-coding-agent": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@mariozechner/pi-agent-core": "0.65.2",
+    "@mariozechner/pi-ai": "0.65.2",
+    "@mariozechner/pi-coding-agent": "0.65.2",
+    "@sinclair/typebox": "^0.34.48",
+    "typescript": "^5.9.3"
+  }
+}
