@@ -7,7 +7,11 @@ A Pi extension that performs security audits on other extensions before install 
 ```bash
 pi install ./path/to/pi-secure-extension
 # or after publishing:
-pi install npm:pi-secure-extension
+pi install npm:@panzenbaby/pi-secure-extension
+
+# wann try and run a security audith first?
+pi -e npm:@panzenbaby/pi-secure-extension
+/secure:install npm:@panzenbaby/pi-secure-extension
 ```
 
 ## Commands
