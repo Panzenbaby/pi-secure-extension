@@ -206,24 +206,6 @@ function resolveLocal(path: string): ResolvedSource {
 }
 
 async function resolveNpm(spec: string): Promise<ResolvedSource> {
-  // Check if already installed globally
-  try {
-    const globalRoot = execFileSync("npm", ["root", "-g"], {
-      encoding: "utf-8",
-      stdio: "pipe",
-    }).trim();
-    const pkgName = spec.replace(/@[^/]*$/, "");
-    const installedPath = join(globalRoot, pkgName);
-    if (existsSync(installedPath)) {
-      return {
-        name: spec,
-        files: collectFiles(installedPath, installedPath),
-      };
-    }
-  } catch {
-    // not installed globally, continue
-  }
-
   const tmpDir = await mkdtemp(join(tmpdir(), "pi-secure-audit-"));
   try {
     execFileSync(

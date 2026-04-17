@@ -29,7 +29,10 @@ Audit an extension, then install it if you approve.
 
 ### `/secure:update <source>`
 
-Audit an extension, then update it if you approve.
+Audit an extension source, then update it if you approve.
+
+- For npm sources without a pinned version (e.g. `npm:@foo/bar`), the audit resolves the current registry version.
+- If you pin a version (e.g. `npm:@foo/bar@1.2.3`), that exact version is audited.
 
 ```
 /secure:update npm:@foo/bar
@@ -37,7 +40,7 @@ Audit an extension, then update it if you approve.
 
 ### `/secure:update-all`
 
-Check all installed extensions for updates, audit each one, and prompt to update.
+Check which installed extensions are outdated, audit each available update, and prompt to update.
 
 ```
 /secure:update-all

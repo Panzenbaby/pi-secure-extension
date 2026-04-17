@@ -3,6 +3,8 @@ import type {
   ExtensionCommandContext,
   ExecResult,
 } from "@mariozechner/pi-coding-agent";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { getGlobalRulesPath, getLocalRulesPath } from "./config.js";
 import type { ResolvedSource } from "./source-resolver.js";
 import { resolveSource } from "./source-resolver.js";
@@ -38,6 +40,32 @@ async function resolveAuditSource(
   return resolved;
 }
 
+function isPackageSourceCandidate(spec: string): boolean {
+  return (
+    spec.startsWith("npm:") || spec.startsWith("git:") || spec.includes("/")
+  );
+}
+
+function parseListPackagesOutput(output: string): string[] {
+  const packages = output
+    .split("\n")
+    .map((line: string) => line.replace(/\r$/, ""))
+    .filter((line: string) => /^\s{2}\S/.test(line) && !/^\s{4}\S/.test(line))
+    .map((line: string) => line.trim())
+    .map((line: string) => {
+      const bulletMatch = line.match(/^[-•]\s*(.+)/);
+      return bulletMatch ? bulletMatch[1]!.trim() : line;
+    })
+    .filter((pkg: string) => isPackageSourceCandidate(pkg));
+
+  return Array.from(new Set(packages));
+}
+
+interface PiPackageUpdate {
+  source: string;
+  displayName: string;
+}
+
 async function listPackages(
   pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
@@ -47,21 +75,40 @@ async function listPackages(
       cwd: ctx.cwd,
     });
 
-    return listResult.stdout
-      .split("\n")
-      .filter((line: string) => line.trim())
-      .map((line: string) => {
-        const match = line.match(/^\s*[-•]\s*(.+)/);
-        return match ? match[1]!.trim() : line.trim();
-      })
-      .filter(
-        (pkg: string) =>
-          pkg.startsWith("npm:") ||
-          pkg.startsWith("git:") ||
-          pkg.includes("/"),
-      );
+    return parseListPackagesOutput(listResult.stdout);
   } catch {
     ctx.ui.notify("Could not list installed packages.", "error");
+    return null;
+  }
+}
+
+async function listOutdatedPackages(
+  _pi: ExtensionAPI,
+  ctx: ExtensionCommandContext,
+): Promise<string[] | null> {
+  try {
+    const codingAgentEntry = import.meta.resolve("@mariozechner/pi-coding-agent");
+    const distDir = dirname(fileURLToPath(codingAgentEntry));
+
+    const [{ DefaultPackageManager }, { SettingsManager }, { getAgentDir }] =
+      await Promise.all([
+        import(pathToFileURL(join(distDir, "core/package-manager.js")).href),
+        import(pathToFileURL(join(distDir, "core/settings-manager.js")).href),
+        import(pathToFileURL(join(distDir, "config.js")).href),
+      ]);
+
+    const agentDir: string = getAgentDir();
+    const settingsManager = SettingsManager.create(ctx.cwd, agentDir);
+    const packageManager = new DefaultPackageManager({
+      cwd: ctx.cwd,
+      agentDir,
+      settingsManager,
+    });
+
+    const updates: PiPackageUpdate[] = await packageManager.checkForAvailableUpdates();
+    return updates.map((update) => update.source);
+  } catch {
+    ctx.ui.notify("Could not check outdated packages.", "error");
     return null;
   }
 }
@@ -183,22 +230,22 @@ async function handleUpdateAllCommand(
 
   ctx.ui.notify("Checking for outdated extensions...", "info");
 
-  const packages = await listPackages(pi, ctx);
-  if (!packages) {
+  const outdatedPackages = await listOutdatedPackages(pi, ctx);
+  if (!outdatedPackages) {
     return;
   }
 
-  if (packages.length === 0) {
-    ctx.ui.notify("No packages found.", "info");
+  if (outdatedPackages.length === 0) {
+    ctx.ui.notify("All extensions are already up to date.", "info");
     return;
   }
 
   ctx.ui.notify(
-    `Found ${packages.length} package(s). Auditing each before update...`,
+    `Found ${outdatedPackages.length} outdated package(s). Auditing each before update...`,
     "info",
   );
 
-  for (const pkg of packages) {
+  for (const pkg of outdatedPackages) {
     const proceed = await ctx.ui.confirm(
       "Audit Package",
       `Audit and update "${pkg}"?`,
