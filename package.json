@@ -1,6 +1,6 @@
 {
   "name": "@panzenbaby/pi-secure-extension",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "license": "MIT",
   "type": "module",
   "private": false,
@@ -15,6 +15,10 @@
     "extensions": [
       "./src/index.ts"
     ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Panzenbaby/pi-secure-extension.git"
   },
   "publishConfig": {
     "access": "public"
