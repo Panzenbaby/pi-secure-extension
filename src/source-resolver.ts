@@ -41,6 +41,7 @@ const TEXT_EXTENSIONS = new Set([
   ".toml",
   ".txt",
   ".sh",
+  ".py",
   ".css",
   ".html",
   ".svg",
