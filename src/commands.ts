@@ -66,6 +66,37 @@ interface PiPackageUpdate {
   displayName: string;
 }
 
+interface SettingsManagerLike {
+  readonly __brand?: "SettingsManagerLike";
+}
+
+interface PackageManagerLike {
+  checkForAvailableUpdates(): Promise<PiPackageUpdate[]>;
+}
+
+interface PackageManagerModule {
+  DefaultPackageManager: new (options: {
+    cwd: string;
+    agentDir: string;
+    settingsManager: SettingsManagerLike;
+  }) => PackageManagerLike;
+}
+
+interface SettingsManagerModule {
+  SettingsManager: {
+    create(cwd: string, agentDir: string): SettingsManagerLike;
+  };
+}
+
+interface ConfigModule {
+  getAgentDir(): string;
+}
+
+type UpdateAvailabilityResult =
+  | { status: "available"; update: PiPackageUpdate }
+  | { status: "unavailable" }
+  | { status: "error" };
+
 async function listPackages(
   pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
@@ -85,28 +116,34 @@ async function listPackages(
 async function listOutdatedPackages(
   _pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
-): Promise<string[] | null> {
+): Promise<PiPackageUpdate[] | null> {
   try {
     const codingAgentEntry = import.meta.resolve("@mariozechner/pi-coding-agent");
     const distDir = dirname(fileURLToPath(codingAgentEntry));
 
-    const [{ DefaultPackageManager }, { SettingsManager }, { getAgentDir }] =
+    const [packageManagerModule, settingsManagerModule, configModule] =
       await Promise.all([
-        import(pathToFileURL(join(distDir, "core/package-manager.js")).href),
-        import(pathToFileURL(join(distDir, "core/settings-manager.js")).href),
-        import(pathToFileURL(join(distDir, "config.js")).href),
+        import(
+          pathToFileURL(join(distDir, "core/package-manager.js")).href
+        ) as Promise<PackageManagerModule>,
+        import(
+          pathToFileURL(join(distDir, "core/settings-manager.js")).href
+        ) as Promise<SettingsManagerModule>,
+        import(pathToFileURL(join(distDir, "config.js")).href) as Promise<ConfigModule>,
       ]);
 
-    const agentDir: string = getAgentDir();
-    const settingsManager = SettingsManager.create(ctx.cwd, agentDir);
-    const packageManager = new DefaultPackageManager({
+    const agentDir = configModule.getAgentDir();
+    const settingsManager = settingsManagerModule.SettingsManager.create(
+      ctx.cwd,
+      agentDir,
+    );
+    const packageManager = new packageManagerModule.DefaultPackageManager({
       cwd: ctx.cwd,
       agentDir,
       settingsManager,
     });
 
-    const updates: PiPackageUpdate[] = await packageManager.checkForAvailableUpdates();
-    return updates.map((update) => update.source);
+    return await packageManager.checkForAvailableUpdates();
   } catch {
     ctx.ui.notify("Could not check outdated packages.", "error");
     return null;
@@ -127,20 +164,162 @@ function stripVersionSuffix(spec: string): string {
   return spec;
 }
 
+function normalizeGitPath(path: string): string {
+  return path
+    .replace(/\.git$/i, "")
+    .replace(/^\/+/, "")
+    .replace(/\/+$/, "")
+    .toLowerCase();
+}
+
+function buildGitIdentity(host: string, path: string): string | null {
+  const normalizedHost = host.toLowerCase();
+  const normalizedPath = normalizeGitPath(path);
+
+  if (!normalizedHost || normalizedPath.split("/").length < 2) {
+    return null;
+  }
+
+  return `git:${normalizedHost}/${normalizedPath}`;
+}
+
+function getGitFallbackIdentity(hasGitPrefix: boolean, repo: string): string {
+  return hasGitPrefix ? `git:${repo}` : repo;
+}
+
+function stripGitRef(spec: string): string {
+  const trimmed = spec.trim();
+  const scpLikeMatch = trimmed.match(/^git@([^:]+):(.+)$/);
+  if (scpLikeMatch) {
+    const host = scpLikeMatch[1];
+    const pathWithMaybeRef = scpLikeMatch[2];
+    if (!host || !pathWithMaybeRef) {
+      return trimmed;
+    }
+
+    const refSeparator = pathWithMaybeRef.indexOf("@");
+    if (refSeparator < 0) {
+      return trimmed;
+    }
+
+    const repoPath = pathWithMaybeRef.slice(0, refSeparator);
+    return repoPath ? `git@${host}:${repoPath}` : trimmed;
+  }
+
+  if (trimmed.includes("://")) {
+    try {
+      const parsed = new URL(trimmed);
+      const pathWithMaybeRef = parsed.pathname.replace(/^\/+/, "");
+      const refSeparator = pathWithMaybeRef.indexOf("@");
+      if (refSeparator < 0) {
+        return trimmed.replace(/\/+$/, "");
+      }
+
+      const repoPath = pathWithMaybeRef.slice(0, refSeparator);
+      if (!repoPath) {
+        return trimmed.replace(/\/+$/, "");
+      }
+
+      parsed.pathname = `/${repoPath}`;
+      return parsed.toString().replace(/\/+$/, "");
+    } catch {
+      return trimmed;
+    }
+  }
+
+  const slashIndex = trimmed.indexOf("/");
+  if (slashIndex < 0) {
+    return trimmed;
+  }
+
+  const host = trimmed.slice(0, slashIndex);
+  const pathWithMaybeRef = trimmed.slice(slashIndex + 1);
+  const refSeparator = pathWithMaybeRef.indexOf("@");
+  if (refSeparator < 0) {
+    return trimmed;
+  }
+
+  const repoPath = pathWithMaybeRef.slice(0, refSeparator);
+  return repoPath ? `${host}/${repoPath}` : trimmed;
+}
+
+function getGitSourceIdentity(source: string): string | null {
+  const trimmed = source.trim();
+  const hasGitPrefix = trimmed.startsWith("git:");
+  const spec = hasGitPrefix ? trimmed.slice(4).trim() : trimmed;
+
+  if (
+    !hasGitPrefix &&
+    !/^(https?:\/\/|ssh:\/\/|git:\/\/|git@|github\.com\/)/i.test(spec)
+  ) {
+    return null;
+  }
+
+  const repo = stripGitRef(spec);
+  const scpLikeMatch = repo.match(/^git@([^:]+):(.+)$/);
+  if (scpLikeMatch) {
+    const host = scpLikeMatch[1];
+    const path = scpLikeMatch[2];
+    if (host && path) {
+      const identity = buildGitIdentity(host, path);
+      if (identity) {
+        return identity;
+      }
+    }
+
+    return getGitFallbackIdentity(hasGitPrefix, repo);
+  }
+
+  if (repo.includes("://")) {
+    try {
+      const parsed = new URL(repo);
+      const identity = buildGitIdentity(parsed.hostname, parsed.pathname);
+      if (identity) {
+        return identity;
+      }
+    } catch {
+      return getGitFallbackIdentity(hasGitPrefix, repo);
+    }
+  }
+
+  const slashIndex = repo.indexOf("/");
+  if (slashIndex < 0) {
+    return getGitFallbackIdentity(hasGitPrefix, repo);
+  }
+
+  const host = repo.slice(0, slashIndex);
+  const path = repo.slice(slashIndex + 1);
+  if (host.includes(".") || host === "localhost") {
+    const identity = buildGitIdentity(host, path);
+    if (identity) {
+      return identity;
+    }
+  }
+
+  return getGitFallbackIdentity(hasGitPrefix, repo);
+}
+
 function normalizePackageSourceForCompare(source: string): string {
   const trimmed = source.trim();
+  const gitIdentity = getGitSourceIdentity(trimmed);
+  if (gitIdentity) {
+    return gitIdentity;
+  }
 
   if (trimmed.startsWith("npm:")) {
     const spec = trimmed.slice(4);
     return `npm:${stripVersionSuffix(spec).toLowerCase()}`;
   }
 
-  if (trimmed.startsWith("git:")) {
-    const spec = trimmed.slice(4);
-    return `git:${stripVersionSuffix(spec)}`;
+  if (
+    trimmed.startsWith("./") ||
+    trimmed.startsWith("../") ||
+    trimmed.startsWith("/")
+  ) {
+    return `local:${trimmed}`;
   }
 
-  return stripVersionSuffix(trimmed).toLowerCase();
+  return `npm:${stripVersionSuffix(trimmed).toLowerCase()}`;
 }
 
 async function isConfiguredPackageInstalled(
@@ -161,6 +340,46 @@ async function isConfiguredPackageInstalled(
   return normalizedInstalled.has(normalizedSource);
 }
 
+function findMatchingOutdatedPackage(
+  source: string,
+  updates: PiPackageUpdate[],
+): PiPackageUpdate | null {
+  const normalizedSource = normalizePackageSourceForCompare(source);
+  return (
+    updates.find(
+      (update) =>
+        normalizePackageSourceForCompare(update.source) === normalizedSource,
+    ) ?? null
+  );
+}
+
+async function getUpdateAvailability(
+  pi: ExtensionAPI,
+  source: string,
+  ctx: ExtensionCommandContext,
+): Promise<UpdateAvailabilityResult> {
+  const installed = await isConfiguredPackageInstalled(pi, source, ctx);
+  if (!installed) {
+    ctx.ui.notify(
+      `Cannot update \"${source}\": extension is not installed.`,
+      "error",
+    );
+    return { status: "error" };
+  }
+
+  const outdatedPackages = await listOutdatedPackages(pi, ctx);
+  if (!outdatedPackages) {
+    return { status: "error" };
+  }
+
+  const matchingUpdate = findMatchingOutdatedPackage(source, outdatedPackages);
+  if (!matchingUpdate) {
+    return { status: "unavailable" };
+  }
+
+  return { status: "available", update: matchingUpdate };
+}
+
 async function runInstallOrUpdateCommand(
   pi: ExtensionAPI,
   source: string,
@@ -170,17 +389,6 @@ async function runInstallOrUpdateCommand(
 ): Promise<void> {
   if (!ensureModelSelected(ctx)) {
     return;
-  }
-
-  if (action === "update") {
-    const installed = await isConfiguredPackageInstalled(pi, source, ctx);
-    if (!installed) {
-      ctx.ui.notify(
-        `Cannot update \"${source}\": extension is not installed.`,
-        "error",
-      );
-      return;
-    }
   }
 
   const resolved = await resolveAuditSource(source, ctx);
@@ -217,17 +425,30 @@ async function handleUpdateCommand(
     return;
   }
 
-  await runInstallOrUpdateCommand(pi, source, "update", ctx);
+  ctx.ui.notify("Checking for available updates...", "info");
+
+  const availability = await getUpdateAvailability(pi, source, ctx);
+  if (availability.status === "error") {
+    return;
+  }
+
+  if (availability.status === "unavailable") {
+    ctx.ui.notify(`No update available for \"${source}\".`, "info");
+    return;
+  }
+
+  await runInstallOrUpdateCommand(
+    pi,
+    availability.update.source,
+    "update",
+    ctx,
+  );
 }
 
 async function handleUpdateAllCommand(
   pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
 ): Promise<void> {
-  if (!ensureModelSelected(ctx)) {
-    return;
-  }
-
   ctx.ui.notify("Checking for outdated extensions...", "info");
 
   const outdatedPackages = await listOutdatedPackages(pi, ctx);
@@ -240,6 +461,10 @@ async function handleUpdateAllCommand(
     return;
   }
 
+  if (!ensureModelSelected(ctx)) {
+    return;
+  }
+
   ctx.ui.notify(
     `Found ${outdatedPackages.length} outdated package(s). Auditing each before update...`,
     "info",
@@ -248,13 +473,13 @@ async function handleUpdateAllCommand(
   for (const pkg of outdatedPackages) {
     const proceed = await ctx.ui.confirm(
       "Audit Package",
-      `Audit and update "${pkg}"?`,
+      `Audit and update "${pkg.source}"?`,
     );
     if (!proceed) {
       continue;
     }
 
-    await runInstallOrUpdateCommand(pi, pkg, "update", ctx);
+    await runInstallOrUpdateCommand(pi, pkg.source, "update", ctx);
   }
 
   ctx.ui.notify("Update-all complete.", "info");
