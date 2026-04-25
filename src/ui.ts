@@ -289,6 +289,76 @@ export function ensureModelSelected(ctx: ExtensionCommandContext): boolean {
   return false;
 }
 
+interface LoadingIndicatorOptions {
+  statusKey: string;
+  workingMessage?: string;
+  buildStatusMessage: (frame: string, elapsed: string) => string;
+  onEscape?: () => void;
+}
+
+function formatElapsedTime(elapsedMs: number): string {
+  const totalSeconds = Math.floor(elapsedMs / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+export async function withLoadingIndicator<T>(
+  ctx: ExtensionCommandContext,
+  options: LoadingIndicatorOptions,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+  let spinnerIndex = 0;
+  let spinnerTimer: ReturnType<typeof setInterval> | undefined;
+  const startedAt = Date.now();
+
+  const unsubscribeTerminalInput = options.onEscape
+    ? ctx.ui.onTerminalInput((data) => {
+        if (!matchesKey(data, "escape")) {
+          return undefined;
+        }
+
+        options.onEscape?.();
+        return { consume: true };
+      })
+    : () => undefined;
+
+  if (options.workingMessage) {
+    ctx.ui.setWorkingMessage(options.workingMessage);
+  }
+
+  const renderStatus = () => {
+    try {
+      const frame = spinnerFrames[spinnerIndex % spinnerFrames.length] ?? "…";
+      spinnerIndex += 1;
+      const elapsed = formatElapsedTime(Date.now() - startedAt);
+      ctx.ui.setStatus(
+        options.statusKey,
+        options.buildStatusMessage(frame, elapsed),
+      );
+    } catch {
+      // Ignore status rendering errors to avoid breaking command execution.
+    }
+  };
+
+  renderStatus();
+  spinnerTimer = setInterval(renderStatus, 120);
+
+  try {
+    return await operation();
+  } finally {
+    unsubscribeTerminalInput();
+    if (spinnerTimer) {
+      clearInterval(spinnerTimer);
+    }
+    ctx.ui.setStatus(options.statusKey, undefined);
+    if (options.workingMessage) {
+      ctx.ui.setWorkingMessage();
+    }
+  }
+}
+
 export async function executeAudit(
   resolved: ResolvedSource,
   ctx: ExtensionCommandContext,
@@ -298,10 +368,6 @@ export async function executeAudit(
   const modelLabel = ctx.model?.name ?? ctx.model?.id;
   const suffix = modelLabel ? ` with ${modelLabel}` : "";
   const abortController = new AbortController();
-  const spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-  let spinnerIndex = 0;
-  let spinnerTimer: ReturnType<typeof setInterval> | undefined;
-  const startedAt = Date.now();
 
   const forwardAbort = () => {
     abortController.abort();
@@ -316,53 +382,38 @@ export async function executeAudit(
   }
 
   let escCancellationRequested = false;
-  const unsubscribeTerminalInput = ctx.ui.onTerminalInput((data) => {
-    if (matchesKey(data, "escape") && !abortController.signal.aborted) {
-      escCancellationRequested = true;
-      ctx.ui.notify("Cancelling security audit...", "warning");
-      abortController.abort();
-      return { consume: true };
-    }
-
-    return undefined;
-  });
 
   ctx.ui.notify(
     `Found ${resolved.files.length} files. Running security audit${suffix}...`,
     "info",
   );
-  ctx.ui.setWorkingMessage(statusMessage);
-
-  const renderStatus = () => {
-    try {
-      const frame = spinnerFrames[spinnerIndex % spinnerFrames.length] ?? "…";
-      spinnerIndex += 1;
-
-      const elapsedMs = Date.now() - startedAt;
-      const totalSeconds = Math.floor(elapsedMs / 1000);
-      const minutes = Math.floor(totalSeconds / 60);
-      const seconds = totalSeconds % 60;
-      const elapsed = `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-
-      ctx.ui.setStatus(
-        "secure-audit",
-        `${frame} Auditing ${resolved.files.length} files • ${elapsed} • Esc: cancel`,
-      );
-    } catch {
-      // Ignore status rendering errors to avoid breaking audit execution.
-    }
-  };
-
-  renderStatus();
-  spinnerTimer = setInterval(renderStatus, 120);
 
   try {
-    const result = await runAudit(
-      resolved,
+    const result = await withLoadingIndicator(
       ctx,
-      undefined,
-      abortController.signal,
-      makeConfirmFn(ctx),
+      {
+        statusKey: "secure-audit",
+        workingMessage: statusMessage,
+        buildStatusMessage: (frame, elapsed) =>
+          `${frame} Auditing ${resolved.files.length} files • ${elapsed} • Esc: cancel`,
+        onEscape: () => {
+          if (abortController.signal.aborted) {
+            return;
+          }
+
+          escCancellationRequested = true;
+          ctx.ui.notify("Cancelling security audit...", "warning");
+          abortController.abort();
+        },
+      },
+      async () =>
+        await runAudit(
+          resolved,
+          ctx,
+          undefined,
+          abortController.signal,
+          makeConfirmFn(ctx),
+        ),
     );
 
     if (result.error) {
@@ -380,15 +431,9 @@ export async function executeAudit(
 
     return result;
   } finally {
-    unsubscribeTerminalInput();
-    if (spinnerTimer) {
-      clearInterval(spinnerTimer);
-    }
     if (signal) {
       signal.removeEventListener("abort", forwardAbort);
     }
-    ctx.ui.setStatus("secure-audit", undefined);
-    ctx.ui.setWorkingMessage();
   }
 }
 

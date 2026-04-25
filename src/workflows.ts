@@ -4,7 +4,11 @@ import type {
   ExecResult,
 } from "@mariozechner/pi-coding-agent";
 import type { ResolvedSource } from "./source-resolver.js";
-import { executeAudit, parseAuditMetadata } from "./ui.js";
+import {
+  executeAudit,
+  parseAuditMetadata,
+  withLoadingIndicator,
+} from "./ui.js";
 
 const JSON_FOOTER_REGEX = /\n*```json[^`]*```\s*$/i;
 
@@ -103,9 +107,19 @@ export async function auditAndConfirm(
     ctx.ui.notify(`Running: pi ${piArgs.join(" ")}`, "info");
 
     try {
-      const execResult: ExecResult = await pi.exec("pi", piArgs, {
-        cwd: ctx.cwd,
-      });
+      const execResult: ExecResult = await withLoadingIndicator(
+        ctx,
+        {
+          statusKey: `secure-${action}`,
+          workingMessage: `Running pi ${action}...`,
+          buildStatusMessage: (frame, elapsed) =>
+            `${frame} ${action === "install" ? "Installing" : "Updating"} extension • ${elapsed}`,
+        },
+        async () =>
+          await pi.exec("pi", piArgs, {
+            cwd: ctx.cwd,
+          }),
+      );
       if (execResult.code === 0) {
         ctx.ui.notify(`${action} completed successfully.`, "info");
       } else {

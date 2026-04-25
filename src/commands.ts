@@ -13,6 +13,7 @@ import {
   editRulesFile,
   ensureModelSelected,
   resetRulesFile,
+  withLoadingIndicator,
 } from "./ui.js";
 
 async function resolveAuditSource(
@@ -23,7 +24,16 @@ async function resolveAuditSource(
 
   let resolved: ResolvedSource;
   try {
-    resolved = await resolveSource(source);
+    resolved = await withLoadingIndicator(
+      ctx,
+      {
+        statusKey: "secure-resolve-source",
+        workingMessage: "Loading extension source...",
+        buildStatusMessage: (frame, elapsed) =>
+          `${frame} Loading extension files • ${elapsed}`,
+      },
+      async () => await resolveSource(source),
+    );
   } catch (err) {
     ctx.ui.notify(
       `Failed to resolve source: ${err instanceof Error ? err.message : String(err)}`,
@@ -116,34 +126,50 @@ async function listPackages(
 async function listOutdatedPackages(
   _pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
+  loadingLabel: string,
 ): Promise<PiPackageUpdate[] | null> {
   try {
-    const codingAgentEntry = import.meta.resolve("@mariozechner/pi-coding-agent");
-    const distDir = dirname(fileURLToPath(codingAgentEntry));
+    return await withLoadingIndicator(
+      ctx,
+      {
+        statusKey: "secure-update-check",
+        workingMessage: loadingLabel,
+        buildStatusMessage: (frame, elapsed) =>
+          `${frame} ${loadingLabel} • ${elapsed}`,
+      },
+      async () => {
+        const codingAgentEntry = import.meta.resolve(
+          "@mariozechner/pi-coding-agent",
+        );
+        const distDir = dirname(fileURLToPath(codingAgentEntry));
 
-    const [packageManagerModule, settingsManagerModule, configModule] =
-      await Promise.all([
-        import(
-          pathToFileURL(join(distDir, "core/package-manager.js")).href
-        ) as Promise<PackageManagerModule>,
-        import(
-          pathToFileURL(join(distDir, "core/settings-manager.js")).href
-        ) as Promise<SettingsManagerModule>,
-        import(pathToFileURL(join(distDir, "config.js")).href) as Promise<ConfigModule>,
-      ]);
+        const [packageManagerModule, settingsManagerModule, configModule] =
+          await Promise.all([
+            import(
+              pathToFileURL(join(distDir, "core/package-manager.js")).href
+            ) as Promise<PackageManagerModule>,
+            import(
+              pathToFileURL(join(distDir, "core/settings-manager.js")).href
+            ) as Promise<SettingsManagerModule>,
+            import(
+              pathToFileURL(join(distDir, "config.js")).href
+            ) as Promise<ConfigModule>,
+          ]);
 
-    const agentDir = configModule.getAgentDir();
-    const settingsManager = settingsManagerModule.SettingsManager.create(
-      ctx.cwd,
-      agentDir,
+        const agentDir = configModule.getAgentDir();
+        const settingsManager = settingsManagerModule.SettingsManager.create(
+          ctx.cwd,
+          agentDir,
+        );
+        const packageManager = new packageManagerModule.DefaultPackageManager({
+          cwd: ctx.cwd,
+          agentDir,
+          settingsManager,
+        });
+
+        return await packageManager.checkForAvailableUpdates();
+      },
     );
-    const packageManager = new packageManagerModule.DefaultPackageManager({
-      cwd: ctx.cwd,
-      agentDir,
-      settingsManager,
-    });
-
-    return await packageManager.checkForAvailableUpdates();
   } catch {
     ctx.ui.notify("Could not check outdated packages.", "error");
     return null;
@@ -367,7 +393,11 @@ async function getUpdateAvailability(
     return { status: "error" };
   }
 
-  const outdatedPackages = await listOutdatedPackages(pi, ctx);
+  const outdatedPackages = await listOutdatedPackages(
+    pi,
+    ctx,
+    "Checking for available updates...",
+  );
   if (!outdatedPackages) {
     return { status: "error" };
   }
@@ -451,7 +481,11 @@ async function handleUpdateAllCommand(
 ): Promise<void> {
   ctx.ui.notify("Checking for outdated extensions...", "info");
 
-  const outdatedPackages = await listOutdatedPackages(pi, ctx);
+  const outdatedPackages = await listOutdatedPackages(
+    pi,
+    ctx,
+    "Checking for outdated extensions...",
+  );
   if (!outdatedPackages) {
     return;
   }
